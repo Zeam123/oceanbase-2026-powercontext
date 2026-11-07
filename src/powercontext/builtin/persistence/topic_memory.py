@@ -46,6 +46,7 @@ from powercontext.builtin.artifacts.topic_memory import (
     TopicMemoryStorageInvariantError,
     TopicMemoryUsedSearchMode,
     chunk_topic_memory_detail,
+    prepare_topic_memory_projection,
 )
 from powercontext.builtin.artifacts.topic_memory.fusion import _fuse_topic_memory_rankings
 from powercontext.builtin.persistence.artifacts import ArtifactRepository
@@ -519,6 +520,76 @@ class TopicMemoryRepository:
                 published_at=published_at,
             )
         )
+        await self._replace_active(connection, scope_id, topic, projection)
+        return published_at
+
+    async def set_searchable(
+        self,
+        connection: AsyncConnection,
+        scope_id: str,
+        ref: ArtifactRef,
+        enabled: bool,
+        /,
+        *,
+        projection: TopicMemoryProjection | None = None,
+    ) -> None:
+        """Show or hide one exact revision in search without deleting its history."""
+
+        if ref.family != TopicMemory.family:
+            raise InvalidRepositoryArgumentError("artifact_ref", "must reference topic-memory")
+        hidden = await self._hidden_flag(connection, scope_id, ref.artifact_id)
+        if hidden is not None and (not hidden) == enabled:
+            return
+        if hidden is not None:
+            await self._set_hidden(connection, scope_id, ref.artifact_id, not enabled)
+            return
+        if not enabled:
+            return
+        topic = await self.artifacts.get(connection, scope_id, ref)
+        if not isinstance(topic, TopicMemory):
+            raise TopicMemoryStorageInvariantError("artifact-type", ref)
+        if projection is None:
+            projection = prepare_topic_memory_projection(topic.content)
+        projection = self._validate_projection(TopicMemoryDraft(content=topic.content), projection)
+        await self._ensure_retrieval_shape(connection)
+        await self._replace_active(connection, scope_id, topic, projection)
+
+    async def _is_searchable(self, connection: AsyncConnection, scope_id: str, artifact_id: str) -> bool:
+        return await self._hidden_flag(connection, scope_id, artifact_id) is False
+
+    async def _hidden_flag(self, connection: AsyncConnection, scope_id: str, artifact_id: str) -> bool | None:
+        row = (
+            await connection.execute(
+                select(TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.lifecycle_hidden).where(
+                    TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.scope_id == scope_id,
+                    TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.family == TopicMemory.family,
+                    TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.artifact_id == artifact_id,
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        return bool(row[0])
+
+    async def _set_hidden(self, connection: AsyncConnection, scope_id: str, artifact_id: str, hidden: bool) -> None:
+        await connection.execute(
+            update(TOPIC_MEMORY_ACTIVE_TOPICS_TABLE)
+            .where(
+                TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.scope_id == scope_id,
+                TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.family == TopicMemory.family,
+                TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.artifact_id == artifact_id,
+            )
+            .values(lifecycle_hidden=hidden)
+        )
+
+    async def _replace_active(
+        self,
+        connection: AsyncConnection,
+        scope_id: str,
+        topic: TopicMemory,
+        projection: TopicMemoryProjection,
+    ) -> None:
+        ref = topic.as_ref()
         await self.index.replace(connection, scope_id, ref, projection)
         await connection.execute(
             delete(TOPIC_MEMORY_ACTIVE_CHUNKS_TABLE).where(
@@ -542,27 +613,28 @@ class TopicMemoryRepository:
                 summary=topic.content.summary,
                 searchable_text=projection.topic_searchable_text,
                 source_count=len(topic.lineage.sources),
+                lifecycle_hidden=False,
             )
         )
-        await connection.execute(
-            insert(TOPIC_MEMORY_ACTIVE_CHUNKS_TABLE),
-            [
-                {
-                    "scope_id": scope_id,
-                    "family": TopicMemory.family,
-                    "artifact_id": ref.artifact_id,
-                    "revision": ref.revision,
-                    "chunk_ordinal": chunk.ordinal,
-                    "start_offset": chunk.start_offset,
-                    "end_offset": chunk.end_offset,
-                    "chunk_text": chunk.text,
-                    "searchable_text": analyze_text(chunk.text),
-                    "policy_version": chunk.policy_version,
-                }
-                for chunk in projection.chunks
-            ],
-        )
-        return published_at
+        if projection.chunks:
+            await connection.execute(
+                insert(TOPIC_MEMORY_ACTIVE_CHUNKS_TABLE),
+                [
+                    {
+                        "scope_id": scope_id,
+                        "family": TopicMemory.family,
+                        "artifact_id": ref.artifact_id,
+                        "revision": ref.revision,
+                        "chunk_ordinal": chunk.ordinal,
+                        "start_offset": chunk.start_offset,
+                        "end_offset": chunk.end_offset,
+                        "chunk_text": chunk.text,
+                        "searchable_text": analyze_text(chunk.text),
+                        "policy_version": chunk.policy_version,
+                    }
+                    for chunk in projection.chunks
+                ],
+            )
 
     def _validate_projection(
         self,

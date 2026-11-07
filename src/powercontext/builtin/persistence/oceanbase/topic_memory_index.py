@@ -99,7 +99,7 @@ WITH candidates AS (
 SELECT a.artifact_id, a.revision, a.title, a.summary, n.distance
 FROM candidates AS n
 JOIN pc_topic_memory_active_topics AS a
-  ON a.scope_id = n.scope_id AND a.artifact_id = n.artifact_id AND a.revision = n.revision
+  ON a.scope_id = n.scope_id AND a.artifact_id = n.artifact_id AND a.revision = n.revision AND a.lifecycle_hidden = 0
 ORDER BY distance, artifact_id, revision DESC
 """
 _CHUNK_VECTOR_SEARCH = """
@@ -120,7 +120,7 @@ WITH neighbors AS (
            ) AS topic_rank
     FROM neighbors AS n
     JOIN pc_topic_memory_active_topics AS a
-      ON a.scope_id = n.scope_id AND a.artifact_id = n.artifact_id AND a.revision = n.revision
+      ON a.scope_id = n.scope_id AND a.artifact_id = n.artifact_id AND a.revision = n.revision AND a.lifecycle_hidden = 0
     JOIN pc_topic_memory_active_chunks AS c
       ON c.scope_id = n.scope_id AND c.artifact_id = n.artifact_id
      AND c.revision = n.revision AND c.chunk_ordinal = n.chunk_ordinal
@@ -164,6 +164,16 @@ class OceanBaseTopicMemoryFTSIndex:
     ) -> None:
         pass
 
+    async def remove(
+        self,
+        _connection: AsyncConnection,
+        _scope_id: str,
+        _topic_ref: ArtifactRef,
+        /,
+    ) -> None:
+        # Lexical search reads the active topic table, which the repository clears.
+        return None
+
     async def search(
         self,
         connection: AsyncConnection,
@@ -174,6 +184,7 @@ class OceanBaseTopicMemoryFTSIndex:
         if request.mode not in {"fts", "hybrid"} or not request.analyzed_query:
             return TopicMemorySearchChannels()
         query_terms, coverage_required = fts_query_requirements(request.query, floor=request.admission)
+        topic_visible = TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.lifecycle_hidden == 0
         topic_score = match(TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.searchable_text, against=request.analyzed_query)
         topic_coverage = _coverage_expression(
             TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.searchable_text,
@@ -185,6 +196,7 @@ class OceanBaseTopicMemoryFTSIndex:
             .select_from(TOPIC_MEMORY_ACTIVE_TOPICS_TABLE)
             .where(
                 TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.scope_id == scope_id,
+                topic_visible,
                 topic_score,
             )
         )
@@ -193,6 +205,7 @@ class OceanBaseTopicMemoryFTSIndex:
             .select_from(TOPIC_MEMORY_ACTIVE_TOPICS_TABLE)
             .where(
                 TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.scope_id == scope_id,
+                topic_visible,
                 topic_score,
                 topic_coverage,
             )
@@ -207,6 +220,7 @@ class OceanBaseTopicMemoryFTSIndex:
                 )
                 .where(
                     TOPIC_MEMORY_ACTIVE_TOPICS_TABLE.c.scope_id == scope_id,
+                    topic_visible,
                     topic_score,
                     topic_coverage,
                 )
@@ -258,6 +272,7 @@ class OceanBaseTopicMemoryFTSIndex:
             )
             .where(
                 TOPIC_MEMORY_ACTIVE_CHUNKS_TABLE.c.scope_id == scope_id,
+                topic_visible,
                 chunk_score,
             )
             .subquery()
@@ -446,6 +461,26 @@ class OceanBaseTopicMemoryVectorIndex:
                 }
                 for chunk, embedding in zip(projection.chunks, projection.chunk_embeddings, strict=True)
             ],
+        )
+
+    async def remove(
+        self,
+        connection: AsyncConnection,
+        scope_id: str,
+        topic_ref: ArtifactRef,
+        /,
+    ) -> None:
+        await connection.execute(
+            delete(self.chunk_table).where(
+                self.chunk_table.c.scope_id == scope_id,
+                self.chunk_table.c.artifact_id == topic_ref.artifact_id,
+            )
+        )
+        await connection.execute(
+            delete(self.topic_table).where(
+                self.topic_table.c.scope_id == scope_id,
+                self.topic_table.c.artifact_id == topic_ref.artifact_id,
+            )
         )
 
     async def search(

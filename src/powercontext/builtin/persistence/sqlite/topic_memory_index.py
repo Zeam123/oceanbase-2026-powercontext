@@ -153,6 +153,10 @@ _SEARCH_TOPIC_FTS_SQL = """
                bm25(pc_topic_memory_topic_fts) AS score, ({coverage}) AS coverage
         FROM pc_topic_memory_topic_fts
         WHERE pc_topic_memory_topic_fts MATCH :query AND scope_id = :scope_id
+          AND artifact_id NOT IN (
+              SELECT hidden_topic.artifact_id FROM pc_topic_memory_active_topics AS hidden_topic
+              WHERE hidden_topic.scope_id = :scope_id AND hidden_topic.lifecycle_hidden != 0
+          )
     )
     SELECT artifact_id, revision, title, summary
     FROM scored
@@ -164,12 +168,20 @@ _COUNT_TOPIC_FTS_SQL = """
     SELECT count(*)
     FROM pc_topic_memory_topic_fts
     WHERE pc_topic_memory_topic_fts MATCH :query AND scope_id = :scope_id
+          AND artifact_id NOT IN (
+              SELECT hidden_topic.artifact_id FROM pc_topic_memory_active_topics AS hidden_topic
+              WHERE hidden_topic.scope_id = :scope_id AND hidden_topic.lifecycle_hidden != 0
+          )
     """
 _COUNT_TOPIC_FTS_ELIGIBLE_SQL = """
     WITH scored AS (
         SELECT ({coverage}) AS coverage
         FROM pc_topic_memory_topic_fts
         WHERE pc_topic_memory_topic_fts MATCH :query AND scope_id = :scope_id
+          AND artifact_id NOT IN (
+              SELECT hidden_topic.artifact_id FROM pc_topic_memory_active_topics AS hidden_topic
+              WHERE hidden_topic.scope_id = :scope_id AND hidden_topic.lifecycle_hidden != 0
+          )
     )
     SELECT count(*)
     FROM scored
@@ -181,6 +193,10 @@ _SEARCH_CHUNK_FTS_SQL = """
                bm25(pc_topic_memory_chunk_fts) AS score, ({coverage}) AS coverage
         FROM pc_topic_memory_chunk_fts
         WHERE pc_topic_memory_chunk_fts MATCH :query AND scope_id = :scope_id
+          AND artifact_id NOT IN (
+              SELECT hidden_topic.artifact_id FROM pc_topic_memory_active_topics AS hidden_topic
+              WHERE hidden_topic.scope_id = :scope_id AND hidden_topic.lifecycle_hidden != 0
+          )
     ), ranked AS (
         SELECT scored.*,
                row_number() OVER (
@@ -201,6 +217,10 @@ _COUNT_CHUNK_FTS_SQL = """
                bm25(pc_topic_memory_chunk_fts) AS score, ({coverage}) AS coverage
         FROM pc_topic_memory_chunk_fts
         WHERE pc_topic_memory_chunk_fts MATCH :query AND scope_id = :scope_id
+          AND artifact_id NOT IN (
+              SELECT hidden_topic.artifact_id FROM pc_topic_memory_active_topics AS hidden_topic
+              WHERE hidden_topic.scope_id = :scope_id AND hidden_topic.lifecycle_hidden != 0
+          )
     ), ranked AS (
         SELECT scored.*,
                row_number() OVER (
@@ -219,6 +239,10 @@ _COUNT_CHUNK_FTS_ELIGIBLE_SQL = """
                bm25(pc_topic_memory_chunk_fts) AS score, ({coverage}) AS coverage
         FROM pc_topic_memory_chunk_fts
         WHERE pc_topic_memory_chunk_fts MATCH :query AND scope_id = :scope_id
+          AND artifact_id NOT IN (
+              SELECT hidden_topic.artifact_id FROM pc_topic_memory_active_topics AS hidden_topic
+              WHERE hidden_topic.scope_id = :scope_id AND hidden_topic.lifecycle_hidden != 0
+          )
     ), ranked AS (
         SELECT scored.*,
                row_number() OVER (
@@ -260,7 +284,7 @@ _TOPIC_VECTOR_SEARCH_SQL = text(
     FROM nearest
     JOIN pc_topic_memory_vector_topics AS v ON v.vector_id = nearest.rowid
     JOIN pc_topic_memory_active_topics AS a
-      ON a.scope_id = v.scope_id AND a.artifact_id = v.artifact_id AND a.revision = v.revision
+      ON a.scope_id = v.scope_id AND a.artifact_id = v.artifact_id AND a.revision = v.revision AND a.lifecycle_hidden = 0
     WHERE v.scope_id = :scope_id
     ORDER BY nearest.distance, a.artifact_id, a.revision DESC
     LIMIT :candidate_limit
@@ -285,7 +309,7 @@ _CHUNK_VECTOR_SEARCH_SQL = text(
         FROM nearest
         JOIN pc_topic_memory_vector_chunks AS v ON v.vector_id = nearest.rowid
         JOIN pc_topic_memory_active_topics AS a
-          ON a.scope_id = v.scope_id AND a.artifact_id = v.artifact_id AND a.revision = v.revision
+          ON a.scope_id = v.scope_id AND a.artifact_id = v.artifact_id AND a.revision = v.revision AND a.lifecycle_hidden = 0
         JOIN pc_topic_memory_active_chunks AS c
           ON c.scope_id = v.scope_id AND c.artifact_id = v.artifact_id
          AND c.revision = v.revision AND c.chunk_ordinal = v.chunk_ordinal
@@ -383,6 +407,17 @@ class SQLiteTopicMemoryFTSIndex:
                     "searchable_text": analyze_text(chunk.text),
                 },
             )
+
+    async def remove(
+        self,
+        connection: AsyncConnection,
+        scope_id: str,
+        topic_ref: ArtifactRef,
+        /,
+    ) -> None:
+        identity = {"scope_id": scope_id, "artifact_id": topic_ref.artifact_id}
+        await connection.execute(_DELETE_TOPIC_FTS_SQL, identity)
+        await connection.execute(_DELETE_CHUNK_FTS_SQL, identity)
 
     async def search(
         self,
@@ -597,6 +632,15 @@ class SQLiteTopicMemoryVectorIndex:
                     ),
                 },
             )
+
+    async def remove(
+        self,
+        connection: AsyncConnection,
+        scope_id: str,
+        topic_ref: ArtifactRef,
+        /,
+    ) -> None:
+        await self._delete_existing(connection, scope_id, topic_ref.artifact_id)
 
     async def search(
         self,

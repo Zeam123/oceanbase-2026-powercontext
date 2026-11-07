@@ -640,6 +640,7 @@ TOPIC_MEMORY_ACTIVE_TOPICS_TABLE = Table(
     Column("summary", _entry_text_type(), nullable=False),
     Column("searchable_text", _entry_text_type(), nullable=False),
     Column("source_count", Integer, nullable=False),
+    Column("lifecycle_hidden", Boolean, nullable=False, server_default="0"),
     ForeignKeyConstraint(
         ("scope_id", "family", "artifact_id", "revision"),
         (
@@ -1180,6 +1181,32 @@ RECURRENCE_OBSERVATION_TABLE = Table(
 
 RECURRENCE_TABLES = (RECURRENCE_MATCH_TABLE, RECURRENCE_OBSERVATION_TABLE)
 
+SOURCE_LIFECYCLE_NODES_TABLE = Table(
+    "pc_source_lifecycle_nodes",
+    SHARED_METADATA,
+    Column("scope_id", identity_string(MAX_SCOPE_ID_LENGTH), primary_key=True),
+    Column("node_id", identity_string(256), primary_key=True),
+    Column("ordinal", Integer, nullable=False),
+    Column("kind", String(16), nullable=False),
+    Column("policy", String(8)),
+    Column("lifecycle_revision", Integer, nullable=False),
+    Column("ref_json", _entry_text_type(), nullable=False),
+    Column("parents_json", _entry_text_type(), nullable=False),
+    Column("available", Boolean, nullable=False),
+    Column("last_sequence", Integer, nullable=False),
+    Column("last_event_json", _entry_text_type()),
+    CheckConstraint("kind IN ('source', 'memory', 'topic')", name="ck_pc_source_lifecycle_kind"),
+    CheckConstraint(
+        "policy IS NULL OR policy IN ('all', 'any')",
+        name="ck_pc_source_lifecycle_policy",
+    ),
+    CheckConstraint("lifecycle_revision >= 0", name="ck_pc_source_lifecycle_revision"),
+    CheckConstraint("last_sequence >= 0", name="ck_pc_source_lifecycle_sequence"),
+    CheckConstraint("ordinal >= 0", name="ck_pc_source_lifecycle_ordinal"),
+)
+
+SOURCE_LIFECYCLE_TABLES = (SOURCE_LIFECYCLE_NODES_TABLE,)
+
 BUILTIN_TABLES = (
     SCOPE_TABLES
     + SHARED_TABLES
@@ -1187,5 +1214,6 @@ BUILTIN_TABLES = (
     + MEMORY_TABLES
     + STATISTICS_TABLES
     + RECURRENCE_TABLES
+    + SOURCE_LIFECYCLE_TABLES
     + (ARTIFACT_TAGS_TABLE, DREAM_RUNS_TABLE, RECEIPT_MIGRATION_REVIEW_TABLE)
 )
