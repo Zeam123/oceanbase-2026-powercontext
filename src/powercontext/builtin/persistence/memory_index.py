@@ -249,7 +249,11 @@ class CompositeMemoryIndex:
     ) -> MemorySearchChannels:
         fts: tuple[MemoryChannelHit, ...] = ()
         vector: tuple[MemoryChannelHit, ...] = ()
-        for index in self.indexes:
+        # seekdb hybrid candidate retrieval is one statement on the vector index.
+        # Other backends still search each channel on its own.
+        native = tuple(index for index in self.indexes if getattr(index, "searches_hybrid_natively", False))
+        selected = native if request.mode == "hybrid" and native else self.indexes
+        for index in selected:
             channels = await index.search(connection, scope_id, request)
             fts += channels.fts
             vector += channels.vector
